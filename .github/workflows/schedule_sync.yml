@@ -3,8 +3,12 @@ name: Run Tado-Octopus Script
 on:
   workflow_dispatch:
   schedule:
-    # Runs every Wednesday at 12pm UTC
+    # Runs every day at 2am UTC
     - cron: '0 2 * * *'
+
+permissions:
+  contents: read
+  actions: write
 
 jobs:
   run_script:
@@ -35,3 +39,16 @@ jobs:
           --mprn "${{ secrets.OCTOPUS_MPRN }}" \
           --gas-serial-number "${{ secrets.OCTOPUS_GAS_SERIAL }}" \
           --octopus-api-key "${{ secrets.OCTOPUS_API_KEY }}"
+
+  # GitHub disables scheduled workflows in public repos after 60 days without
+  # repository activity. Re-enabling the workflow through the API resets that
+  # timer, so the daily sync keeps running without needing dummy commits.
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Keep scheduled workflow enabled
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh api --method PUT \
+          "repos/${{ github.repository }}/actions/workflows/schedule_sync.yml/enable"
