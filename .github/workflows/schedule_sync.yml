@@ -3,8 +3,8 @@ name: Run Tado-Octopus Script
 on:
   workflow_dispatch:
   schedule:
-    # Runs every Wednesday at 12pm UTC
-    - cron: '0 12 * * 3'
+    # Runs every day at 06:17 UTC (off the hour to avoid GitHub's schedule backlog)
+    - cron: '17 6 * * *'
 
 jobs:
   run_script:
