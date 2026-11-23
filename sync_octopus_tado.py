@@ -300,34 +300,48 @@ def get_tado_last_meter_reading(tado):
     """
     Retrieves the last meter reading that was sent to Tado.
 
-    Returns: A tuple of (reading_value, datetime_of_reading) or (None, None) if no reading exists.
+    Returns: A tuple of (reading_value, anchor_date) or (None, None) if no reading
+    exists. ``anchor_date`` is the date the current value was FIRST reported, not
+    the date of the newest entry. Older versions of this script re-posted an
+    unchanged value every day, which pushed the date forward before Octopus had
+    published the consumption for it, so the delta was always 0. Anchoring on the
+    start of the flat streak recovers that missed consumption.
     """
     try:
-        # Get energy IQ status which includes meter reading info
         eiq_data = call_tado_method(
             tado, "get_eiq_meter_readings", "getEIQMeterReadings"
         )
 
         if eiq_data and isinstance(eiq_data, dict) and "readings" in eiq_data:
-            readings = eiq_data["readings"]
-            if readings and len(readings) > 0:
-                # The first reading in the list is the most recent
-                latest_reading = readings[0]
-                reading_value = latest_reading.get("reading")
-                reading_date = latest_reading.get("date")
+            readings = [
+                r
+                for r in eiq_data["readings"] or []
+                if r.get("reading") is not None and r.get("date") is not None
+            ]
+            if readings:
+                readings.sort(key=lambda r: parse_api_date(r["date"]), reverse=True)
+                reading_value = readings[0]["reading"]
+                anchor_date = readings[0]["date"]
+                for reading in readings[1:]:
+                    if reading["reading"] != reading_value:
+                        break
+                    anchor_date = reading["date"]
 
-                if reading_value is not None and reading_date is not None:
-                    print(
-                        f"Last Tado meter reading: {reading_value} (date: {reading_date})"
-                    )
-                    return reading_value, reading_date
+                print(
+                    f"Last Tado meter reading: {reading_value} "
+                    f"(unchanged since: {anchor_date}, "
+                    f"latest entry: {readings[0]['date']})"
+                )
+                return reading_value, anchor_date
     except Exception as e:
         print(f"Could not retrieve last Tado meter reading: {e}")
 
     return None, None
 
 
-def get_consumption_since_date(api_key, mprn, gas_serial_number, since_datetime):
+def get_consumption_since_date(
+    api_key, mprn, gas_serial_number, since_datetime, until_datetime=None
+):
     """
     Retrieves gas consumption from Octopus Energy API since a specific date.
 
@@ -335,20 +349,21 @@ def get_consumption_since_date(api_key, mprn, gas_serial_number, since_datetime)
         api_key: Octopus API key
         mprn: Meter Point Reference Number
         gas_serial_number: Gas meter serial number
-        since_datetime: datetime object or ISO string - only get consumption after this date
+        since_datetime: date/datetime or ISO string - start of the window (inclusive)
+        until_datetime: optional date/datetime or ISO string - end (exclusive)
 
     Returns:
         Total consumption since the given date
     """
-    if isinstance(since_datetime, str):
-        # Parse ISO format datetime string
-        since_datetime = datetime.fromisoformat(since_datetime.replace("Z", "+00:00"))
-
+    # Sum the raw half-hourly intervals; group_by=quarter returned nothing for
+    # windows that start part-way through a quarter.
     url = (
         f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/"
-        f"{gas_serial_number}/consumption/?group_by=quarter&period_from="
-        f"{since_datetime.isoformat()}Z"
+        f"{gas_serial_number}/consumption/?page_size=25000&order_by=period"
+        f"&period_from={format_api_date(since_datetime)}T00:00:00Z"
     )
+    if until_datetime is not None:
+        url += f"&period_to={format_api_date(until_datetime)}T00:00:00Z"
     consumption_delta = 0.0
 
     while url:
@@ -370,12 +385,15 @@ def get_consumption_since_date(api_key, mprn, gas_serial_number, since_datetime)
     return consumption_delta
 
 
-def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number, tado=None):
+def get_meter_reading_total_consumption(
+    api_key, mprn, gas_serial_number, tado=None, data_delay_days=2, today=None
+):
     """
     Retrieves total gas consumption and calculates the delta since last Tado reading.
 
     Strategy:
-    1. If Tado has a previous reading, query Octopus for consumption SINCE that date
+    1. If Tado has a previous reading, query Octopus for consumption since the
+       date that value was first reported (lagged by data_delay_days)
     2. Add the delta to the previous reading to get the new total
     3. If no previous reading exists, fall back to getting the last 2 years from Octopus
 
@@ -389,10 +407,20 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number, tado=N
         if last_tado_reading is not None and last_tado_update is not None:
             print(f"Using delta sync: last Tado reading was {last_tado_reading}")
 
-            # Get consumption since that date
-            consumption_delta = get_consumption_since_date(
-                api_key, mprn, gas_serial_number, last_tado_update
+            # Octopus publishes smart-meter data a day or two late, so a reading
+            # posted on day D only counts consumption up to D - data_delay_days.
+            today = today or date.today()
+            period_from = parse_api_date(last_tado_update) - timedelta(
+                days=data_delay_days
             )
+            period_to = today - timedelta(days=data_delay_days)
+            print(f"Counting Octopus consumption from {period_from} to {period_to}")
+
+            consumption_delta = 0.0
+            if period_from < period_to:
+                consumption_delta = get_consumption_since_date(
+                    api_key, mprn, gas_serial_number, period_from, period_to
+                )
 
             # New total = old total + new delta
             total_consumption = last_tado_reading + consumption_delta
@@ -506,7 +534,7 @@ def send_reading_to_tado(username, password, reading):
         tado,
         "set_eiq_meter_readings",
         "setEIQMeterReadings",
-        reading=int(reading),
+        reading=int(round(reading)),
     )
     print(result)
 
@@ -517,7 +545,7 @@ def send_reading_to_tado_client(tado, reading):
         tado,
         "set_eiq_meter_readings",
         "setEIQMeterReadings",
-        reading=int(reading),
+        reading=int(round(reading)),
     )
     print(result)
 
@@ -553,6 +581,12 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--data-delay-days",
+        type=int,
+        default=2,
+        help="Days Octopus takes to publish consumption data (default: 2).",
+    )
+    parser.add_argument(
         "--update-tariff",
         action="store_true",
         help="Also sync Octopus gas tariff periods to Tado Energy IQ.",
@@ -569,12 +603,23 @@ def main():
 
     # Get total consumption from Octopus Energy API
     # This will use delta sync if possible, falling back to 2-year window
+    previous_reading, _ = get_tado_last_meter_reading(tado)
     consumption = get_meter_reading_total_consumption(
-        args.octopus_api_key, args.mprn, args.gas_serial_number, tado=tado
+        args.octopus_api_key,
+        args.mprn,
+        args.gas_serial_number,
+        tado=tado,
+        data_delay_days=args.data_delay_days,
     )
 
-    # Send the total consumption to Tado
-    send_reading_to_tado_client(tado, consumption)
+    # Only send when the whole-unit reading changes. Re-sending the same value
+    # moves its date forward and loses consumption Octopus hasn't published yet.
+    if previous_reading is not None and int(round(consumption)) <= int(
+        round(previous_reading)
+    ):
+        print("Reading unchanged; not sending it to Tado")
+    else:
+        send_reading_to_tado_client(tado, consumption)
 
     if args.update_tariff:
         if not args.octopus_account_number:
