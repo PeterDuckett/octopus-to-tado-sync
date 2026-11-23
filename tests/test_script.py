@@ -313,3 +313,60 @@ def test_parse_args_update_tariff_flag():
 
     assert args.update_tariff is True
     assert args.octopus_account_number == "A-12345"
+
+
+def test_get_tado_last_meter_reading_anchors_on_flat_streak():
+    """A value re-posted daily should anchor on the first date it appeared."""
+    mock_tado = MagicMock()
+    mock_tado.get_eiq_meter_readings.return_value = {
+        "readings": [
+            {"reading": 3867, "date": "2026-11-18"},
+            {"reading": 3867, "date": "2026-11-17"},
+            {"reading": 3867, "date": "2026-11-16"},
+            {"reading": 3850, "date": "2026-11-15"},
+            {"reading": 3867, "date": "2026-11-01"},
+        ]
+    }
+
+    reading, anchor = get_tado_last_meter_reading(mock_tado)
+    assert reading == 3867
+    assert anchor == "2026-11-16"
+
+
+@patch("sync_octopus_tado.requests.get")
+def test_delta_sync_uses_lagged_window_without_group_by(mock_get):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = MOCK_CONSUMPTION_RESPONSE
+    mock_get.return_value = mock_response
+
+    mock_tado = MagicMock()
+    mock_tado.get_eiq_meter_readings.return_value = {
+        "readings": [
+            {"reading": 100, "date": "2026-11-20"},
+            {"reading": 100, "date": "2026-11-10"},
+        ]
+    }
+
+    total = get_meter_reading_total_consumption(
+        "k", "123", "GAS", tado=mock_tado, data_delay_days=2, today=date(2026, 11, 23)
+    )
+    assert total == 103.5
+    url = mock_get.call_args[0][0]
+    assert "group_by" not in url
+    assert "period_from=2026-11-08T00:00:00Z" in url
+    assert "period_to=2026-11-21T00:00:00Z" in url
+
+
+@patch("sync_octopus_tado.requests.get")
+def test_delta_sync_skips_query_when_window_empty(mock_get):
+    mock_tado = MagicMock()
+    mock_tado.get_eiq_meter_readings.return_value = {
+        "readings": [{"reading": 100, "date": "2026-11-23"}]
+    }
+
+    total = get_meter_reading_total_consumption(
+        "k", "123", "GAS", tado=mock_tado, data_delay_days=2, today=date(2026, 11, 23)
+    )
+    assert total == 100
+    mock_get.assert_not_called()
