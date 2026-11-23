@@ -5,7 +5,7 @@ on:
 
 jobs:
   run_script:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -31,5 +31,8 @@ jobs:
         make lint
 
     - name: Initialise playwright
+      env:
+        # Playwright has no Ubuntu 26.04 builds yet; use the 24.04 ones
+        PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ubuntu24.04-x64
       run: |
-        playwright install
+        playwright install chromium

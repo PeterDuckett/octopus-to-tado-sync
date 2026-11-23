@@ -8,7 +8,7 @@ on:
 
 jobs:
   run_script:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -26,10 +26,15 @@ jobs:
         pip install -r requirements.txt
 
     - name: Initialise playwright
+      env:
+        # Playwright has no Ubuntu 26.04 builds yet; use the 24.04 ones
+        PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ubuntu24.04-x64
       run: |
-        playwright install
+        playwright install chromium
 
     - name: Run Python script
+      env:
+        PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ubuntu24.04-x64
       run: |
         python sync_octopus_tado.py \
           --tado-email "${{ secrets.TADO_EMAIL }}" \
